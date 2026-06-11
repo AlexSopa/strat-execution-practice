@@ -4,7 +4,7 @@ import type { ChartMarker, ChartPriceLine } from '../../components/CandleChart'
 import { tradePnl, tradeR } from '../../engine/broker'
 import { TICK, classifyShape, magnitudeTarget, isValidAddBar, expectedTrailStop } from '../../engine/strat'
 import type { Direction } from '../../engine/types'
-import { useArmedSetups, useReplayStore } from '../../store/replayStore'
+import { currentPrice, useArmedSetups, useReplayStore } from '../../store/replayStore'
 import ReportCard from './ReportCard'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
@@ -19,22 +19,38 @@ const TYPE_COLORS: Record<string, string> = {
 export default function ReplayMode() {
   const store = useReplayStore()
   const armed = useArmedSetups()
-  const { session, types, index, broker, playing, speedMs, hints, finished } = store
+  const { session, types, index, tick, broker, playing, speedMs, hints, finished } = store
   const [showTypes, setShowTypes] = useState(true)
   const [seedInput, setSeedInput] = useState('')
 
-  const visible = useMemo(() => session.bars.slice(0, index + 1), [session, index])
+  // Closed bars plus the live developing bar aggregated from its ticks so far.
+  const visible = useMemo(() => {
+    const closed = session.bars.slice(0, index + 1)
+    const dev = session.bars[index + 1]
+    if (tick > 0 && dev) {
+      const seen = dev.path.slice(0, tick)
+      closed.push({
+        ...dev,
+        high: Math.max(...seen),
+        low: Math.min(...seen),
+        close: seen[seen.length - 1],
+      })
+    }
+    return closed
+  }, [session, index, tick])
 
   useEffect(() => {
     if (!playing || finished) return
-    const id = setInterval(() => useReplayStore.getState().step(), speedMs)
+    const id = setInterval(() => useReplayStore.getState().stepTick(), speedMs)
     return () => clearInterval(id)
   }, [playing, speedMs, finished])
 
   const markers: ChartMarker[] = useMemo(() => {
     if (!showTypes) return []
-    const start = Math.max(1, visible.length - 70)
-    return visible.slice(start).map((b, k) => {
+    // Only closed bars get labels — the developing bar's type isn't known yet.
+    const closed = session.bars.slice(0, index + 1)
+    const start = Math.max(1, closed.length - 70)
+    return closed.slice(start).map((b, k) => {
       const i = start + k
       const t = types[i]
       const shape = classifyShape(b)
@@ -46,7 +62,7 @@ export default function ReplayMode() {
         color: TYPE_COLORS[t ?? '1'],
       }
     })
-  }, [visible, types, session, showTypes])
+  }, [index, types, session, showTypes])
 
   const priceLines: ChartPriceLine[] = useMemo(() => {
     const lines: ChartPriceLine[] = []
@@ -86,20 +102,20 @@ export default function ReplayMode() {
           <button className="btn" onClick={() => store.setPlaying(!playing)} disabled={finished}>
             {playing ? '⏸ Pause' : '▶ Play'}
           </button>
-          <button className="btn" onClick={() => store.step()} disabled={finished}>
-            Step ▶
+          <button className="btn" onClick={() => store.nextBar()} disabled={finished}>
+            Next bar ▶
           </button>
           <label>
             Speed
             <select value={speedMs} onChange={(e) => store.setSpeedMs(Number(e.target.value))}>
-              <option value={2000}>Slow</option>
-              <option value={1200}>Normal</option>
-              <option value={600}>Fast</option>
-              <option value={250}>Blitz</option>
+              <option value={320}>Slow</option>
+              <option value={150}>Normal</option>
+              <option value={70}>Fast</option>
+              <option value={25}>Blitz</option>
             </select>
           </label>
           <span className="muted">
-            Bar {index + 1} / {session.bars.length}
+            Bar {index + 1} / {session.bars.length} · {currentPrice(store).toFixed(2)}
           </span>
           <label className="toggle">
             <input type="checkbox" checked={showTypes} onChange={(e) => setShowTypes(e.target.checked)} />
@@ -218,6 +234,7 @@ function InTradePanel() {
   const { broker, session, types, index } = store
   const pos = broker.position!
   const last = session.bars[index]
+  const mark = currentPrice(store)
   const [stopInput, setStopInput] = useState<string>('')
 
   const qty = pos.lots.reduce((a, l) => a + l.qty, 0)
@@ -225,10 +242,10 @@ function InTradePanel() {
   const sign = pos.direction === 'long' ? 1 : -1
   const initialStop = pos.stopHistory.length ? pos.stopHistory[0].price : null
   const riskPerShare = initialStop === null ? null : Math.abs(pos.lots[0].price - initialStop)
-  const unrealized = round2(sign * (last.close - avg) * qty)
+  const unrealized = round2(sign * (mark - avg) * qty)
   const unrealizedR =
     riskPerShare && riskPerShare > 0
-      ? round2((sign * (last.close - pos.lots[0].price)) / riskPerShare)
+      ? round2((sign * (mark - pos.lots[0].price)) / riskPerShare)
       : null
 
   const trailCandidate = (() => {
@@ -293,7 +310,7 @@ function InTradePanel() {
           </button>
         </div>
         <button className="btn btn-muted" onClick={() => store.flatten()}>
-          Flatten at {last.close.toFixed(2)}
+          Flatten at {mark.toFixed(2)}
         </button>
       </div>
     </div>

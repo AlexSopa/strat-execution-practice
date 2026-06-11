@@ -103,6 +103,25 @@ describe('generateSession', () => {
     }
   })
 
+  it('bars carry dense tick paths for live intrabar replay', () => {
+    for (const seed of SEEDS) {
+      const { bars } = generateSession({ seed })
+      for (const b of bars.slice(1)) {
+        expect(b.path.length).toBeGreaterThanOrEqual(12)
+      }
+    }
+  })
+
+  it('volatility expands and contracts across the session', () => {
+    for (const seed of SEEDS) {
+      const { bars } = generateSession({ seed, barCount: 200 })
+      const ranges = bars.map((b) => b.high - b.low).sort((a, b) => a - b)
+      const p10 = ranges[Math.floor(ranges.length * 0.1)]
+      const p90 = ranges[Math.floor(ranges.length * 0.9)]
+      expect(p90 / p10, `seed ${seed}`).toBeGreaterThan(2)
+    }
+  })
+
   it('covers all five scenarios and both directions across seeds', () => {
     const scenarios = new Set<string>()
     const dirs = new Set<string>()

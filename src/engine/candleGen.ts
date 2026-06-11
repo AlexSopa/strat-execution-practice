@@ -27,6 +27,48 @@ export interface BarSpec {
   green?: boolean
   /** Which extreme the intrabar path visits first. */
   pathOrder?: 'lowFirst' | 'highFirst'
+  /** Session volatility regime multiplier (expansion > 1, contraction < 1). */
+  vol?: number
+}
+
+/**
+ * Lower-timeframe tick stream for one display bar: a bridge random walk with
+ * clustered volatility that starts at the open, visits both extremes in the
+ * requested order (exactly touching them), and settles at the close. This is
+ * what the chart aggregates live while the bar develops, and what the broker
+ * fills against.
+ */
+function buildPath(
+  rng: Rng,
+  open: number,
+  high: number,
+  low: number,
+  close: number,
+  lowFirst: boolean,
+): number[] {
+  const range = Math.max(high - low, 0.01)
+  const waypoints = lowFirst ? [open, low, high, close] : [open, high, low, close]
+  const path: number[] = []
+  let localVol = 1
+  for (let s = 0; s < 3; s++) {
+    const from = waypoints[s]
+    const to = waypoints[s + 1]
+    const n = Math.max(4, Math.round((Math.abs(to - from) / range) * 14) + Math.floor(rng() * 3))
+    // Until an extreme's own waypoint is reached, keep noise a hair inside it
+    // so the touch order (and therefore fill order) stays as requested.
+    const hiCap = s === 0 && lowFirst ? high - 0.01 : high
+    const loCap = s === 0 && !lowFirst ? low + 0.01 : low
+    for (let k = s === 0 ? 0 : 1; k < n; k++) {
+      const f = k / n
+      localVol = Math.min(2.2, Math.max(0.45, localVol * Math.exp(0.5 * (rng() - 0.5))))
+      const bridge = 2 * Math.sqrt(Math.max(0, f * (1 - f)))
+      const noise = (rng() - 0.5) * range * 0.22 * localVol * bridge
+      const v = from + (to - from) * f + noise
+      path.push(round2(Math.min(hiCap, Math.max(loCap, v))))
+    }
+    path.push(round2(to))
+  }
+  return path
 }
 
 /**
@@ -35,12 +77,15 @@ export interface BarSpec {
  */
 export function makeBar(rng: Rng, prev: Bar, spec: BarSpec, barIntervalSec = 900): Bar {
   const pr = prev.high - prev.low
+  // Volatility regime scales how far bars extend beyond the prior bar —
+  // expansions stretch breaks and outside bars, contractions shrink them.
+  const vol = Math.min(2.4, Math.max(0.45, spec.vol ?? 1))
   let high: number
   let low: number
 
   switch (spec.type) {
     case '1': {
-      const r = pr * rand(rng, 0.35, 0.8)
+      const r = pr * Math.min(0.85, rand(rng, 0.35, 0.8) * Math.sqrt(vol))
       const slack = pr - r
       low = round2(prev.low + slack * rand(rng, 0.15, 0.85))
       high = round2(low + r)
@@ -52,16 +97,16 @@ export function makeBar(rng: Rng, prev: Bar, spec: BarSpec, barIntervalSec = 900
       break
     }
     case '2u':
-      high = round2(prev.high + Math.max(0.02, pr * rand(rng, 0.15, 0.85)))
+      high = round2(prev.high + Math.max(0.02, pr * rand(rng, 0.15, 0.85) * vol))
       low = round2(prev.low + pr * rand(rng, 0.05, 0.45))
       break
     case '2d':
-      low = round2(prev.low - Math.max(0.02, pr * rand(rng, 0.15, 0.85)))
+      low = round2(prev.low - Math.max(0.02, pr * rand(rng, 0.15, 0.85) * vol))
       high = round2(prev.high - pr * rand(rng, 0.05, 0.45))
       break
     case '3':
-      high = round2(prev.high + Math.max(0.02, pr * rand(rng, 0.1, 0.6)))
-      low = round2(prev.low - Math.max(0.02, pr * rand(rng, 0.1, 0.6)))
+      high = round2(prev.high + Math.max(0.02, pr * rand(rng, 0.1, 0.6) * vol))
+      low = round2(prev.low - Math.max(0.02, pr * rand(rng, 0.1, 0.6) * vol))
       break
   }
   if (high - low < 0.05) high = round2(low + 0.05)
@@ -105,18 +150,7 @@ export function makeBar(rng: Rng, prev: Bar, spec: BarSpec, barIntervalSec = 900
   close = Math.min(high, Math.max(low, close))
 
   const lowFirst = spec.pathOrder ? spec.pathOrder === 'lowFirst' : rng() < (green ? 0.7 : 0.3)
-  const waypoints = lowFirst ? [open, low, high, close] : [open, high, low, close]
-  const path: number[] = []
-  for (let s = 0; s < waypoints.length - 1; s++) {
-    const from = waypoints[s]
-    const to = waypoints[s + 1]
-    path.push(round2(from))
-    for (let k = 1; k <= 2; k++) {
-      const v = from + ((to - from) * k) / 3 + (rng() - 0.5) * r * 0.15
-      path.push(round2(Math.min(high, Math.max(low, v))))
-    }
-  }
-  path.push(round2(close))
+  const path = buildPath(rng, open, high, low, close, lowFirst)
 
   return { time: prev.time + barIntervalSec, open, high, low, close, path }
 }
@@ -198,8 +232,13 @@ export function generateSession(opts: SessionOptions): Session {
   bars.push(first)
 
   let trendUp = rng() < 0.5
+  // Mean-reverting volatility regime with occasional shocks: long quiet
+  // stretches that coil, punctuated by expansions that stretch ranges.
+  let vol = 1
   const add = (spec: BarSpec) => {
-    const b = makeBar(rng, bars[bars.length - 1], spec, barIntervalSec)
+    vol = Math.min(2.4, Math.max(0.45, vol * Math.exp(0.22 * (rng() - 0.5)) * Math.exp(0.05 * (1 - vol))))
+    if (rng() < 0.04) vol = Math.min(2.4, vol * rand(rng, 1.4, 1.9)) // expansion shock
+    const b = makeBar(rng, bars[bars.length - 1], { vol, ...spec }, barIntervalSec)
     bars.push(b)
     return b
   }
@@ -255,13 +294,17 @@ export function generateSession(opts: SessionOptions): Session {
       cooldown = 2 + Math.floor(rng() * 3)
     } else {
       // ---- plain regime walk ----
+      // Quiet regimes coil (more inside bars); expansions print more 3s.
       const x = rng()
       if (rng() < 0.06) trendUp = !trendUp
+      const pInside = vol < 0.7 ? 0.34 : vol > 1.6 ? 0.1 : 0.18
+      const pThree = vol > 1.6 ? 0.16 : 0.07
       let spec: BarSpec
-      if (x < 0.5) spec = trendUp ? { type: '2u', green: rng() < 0.75 } : { type: '2d', green: rng() > 0.75 }
-      else if (x < 0.68) spec = { type: '1' }
-      else if (x < 0.92) spec = trendUp ? { type: '2d', green: rng() < 0.35 } : { type: '2u', green: rng() > 0.35 }
-      else spec = { type: '3' }
+      if (x < pInside) spec = { type: '1' }
+      else if (x < pInside + pThree) spec = { type: '3' }
+      else if (x < pInside + pThree + 0.52)
+        spec = trendUp ? { type: '2u', green: rng() < 0.75 } : { type: '2d', green: rng() > 0.75 }
+      else spec = trendUp ? { type: '2d', green: rng() < 0.35 } : { type: '2u', green: rng() > 0.35 }
       add(spec)
       cooldown--
     }

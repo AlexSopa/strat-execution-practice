@@ -18,9 +18,14 @@ await page.waitForSelector('text=Execution Practice', { timeout: 20000 })
 
 // --- Replay tab: step a few bars, place a long, screenshot ---
 await page.waitForSelector('text=Order ticket')
-for (let i = 0; i < 5; i++) await page.click('button:has-text("Step")')
+for (let i = 0; i < 5; i++) await page.click('button:has-text("Next bar")')
+// Live tick playback: let a bar develop on screen, pause mid-bar.
+await page.click('.transport button:has-text("Play")')
+await page.waitForTimeout(1600)
+await page.click('.transport button:has-text("Pause")')
+await page.screenshot({ path: `${OUT}/replay-developing.png` })
 await page.click('button:has-text("Place long")')
-for (let i = 0; i < 10; i++) await page.click('button:has-text("Step")')
+for (let i = 0; i < 10; i++) await page.click('button:has-text("Next bar")')
 await page.screenshot({ path: `${OUT}/replay.png` })
 
 // If we got into a trade, try trailing + flatten to exercise the panel.
@@ -40,8 +45,8 @@ const side = page.locator('button:has-text("Long — buy the break")')
 if (await side.count()) {
   await side.click()
   await page.waitForSelector('text=Click the trigger level')
-  const chart = page.locator('.quiz-layout .panel canvas').first()
-  await chart.click({ position: { x: 600, y: 150 } })
+  const box = await page.locator('.quiz-layout .panel').boundingBox()
+  await page.mouse.click(box.x + box.width * 0.55, box.y + box.height * 0.4)
 }
 await page.waitForSelector('text=Next question')
 await page.screenshot({ path: `${OUT}/quiz-reveal.png` })

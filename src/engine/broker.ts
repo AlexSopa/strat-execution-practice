@@ -124,22 +124,29 @@ export class Broker {
    * entry/stop/target hits resolve in the order price actually moved.
    */
   stepBar(bar: Bar, barIndex: number) {
-    const points = this.lastPrice === null ? bar.path : [this.lastPrice, ...bar.path]
-    for (let s = 0; s < points.length - 1; s++) {
-      const from = points[s]
-      const to = points[s + 1]
-      // The first segment is the gap from the prior close to the open: orders
+    for (let t = 0; t < bar.path.length; t++) this.stepTick(bar, barIndex, t)
+  }
+
+  /**
+   * Process a single intrabar tick (used by live replay so fills, stop-outs,
+   * and adds land mid-bar exactly when price crosses them).
+   */
+  stepTick(bar: Bar, barIndex: number, tickIdx: number) {
+    const price = bar.path[tickIdx]
+    const from = tickIdx === 0 ? this.lastPrice : bar.path[tickIdx - 1]
+    if (from !== null) {
+      // The segment from the prior close to the open is the gap: orders
       // jumped over by a gap fill at the open, not at their own price.
-      const isGap = s === 0 && this.lastPrice !== null
-      this.crossSegment(from, to, isGap ? bar.open : null, bar, barIndex)
+      const gapFill = tickIdx === 0 ? bar.open : null
+      this.crossSegment(from, price, gapFill, bar, barIndex)
     }
     if (this.position) {
       this.position.maxFavorablePrice =
         this.position.direction === 'long'
-          ? Math.max(this.position.maxFavorablePrice, bar.high)
-          : Math.min(this.position.maxFavorablePrice, bar.low)
+          ? Math.max(this.position.maxFavorablePrice, price)
+          : Math.min(this.position.maxFavorablePrice, price)
     }
-    this.lastPrice = bar.close
+    if (tickIdx === bar.path.length - 1) this.lastPrice = bar.close
   }
 
   /** Trigger every order/stop/target whose level lies on [from→to], in crossing order. */

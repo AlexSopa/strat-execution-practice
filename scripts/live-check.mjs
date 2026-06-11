@@ -9,7 +9,7 @@ p.on('console', (m) => {
 })
 await p.goto('https://alexsopa.github.io/strat-execution-practice/', { waitUntil: 'networkidle' })
 await p.waitForSelector('text=Execution Practice', { timeout: 30000 })
-for (let i = 0; i < 3; i++) await p.click('button:has-text("Step")')
+for (let i = 0; i < 3; i++) await p.click('button:has-text("Next bar")')
 await p.screenshot({ path: 'scripts/shots/live.png' })
 await b.close()
 if (errs.length) {

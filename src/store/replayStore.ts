@@ -21,7 +21,10 @@ interface ReplayStore {
   seed: number
   session: Session
   types: (BarType | null)[]
+  /** Index of the last fully closed bar. */
   index: number
+  /** Ticks consumed of the developing bar (index + 1); 0 = not started. */
+  tick: number
   playing: boolean
   speedMs: number
   stopStyle: StopStyle
@@ -33,7 +36,10 @@ interface ReplayStore {
   version: number
 
   newSession: (seed?: number) => void
-  step: () => void
+  /** Advance one intrabar tick — the developing bar grows on the chart. */
+  stepTick: () => void
+  /** Finish the developing bar (or reveal the next one whole). */
+  nextBar: () => void
   setPlaying: (p: boolean) => void
   setSpeedMs: (ms: number) => void
   setStopStyle: (s: StopStyle) => void
@@ -55,13 +61,21 @@ function freshSession(seed: number) {
   return { session, types, broker, index: WARMUP_BARS - 1 }
 }
 
+/** Latest traded price: the developing bar's last tick, else the last close. */
+export function currentPrice(s: { session: Session; index: number; tick: number }): number {
+  const dev = s.session.bars[s.index + 1]
+  if (s.tick > 0 && dev) return dev.path[Math.min(s.tick, dev.path.length) - 1]
+  return s.session.bars[s.index].close
+}
+
 export const useReplayStore = create<ReplayStore>((set, get) => {
   const init = freshSession(Math.floor(Math.random() * 1_000_000))
 
   const finish = () => {
-    const { broker, session, types, index } = get()
-    const last = session.bars[index]
-    broker.closeAll(last.close, index, last.time, 'session-end')
+    const { broker, session, types, index, tick } = get()
+    const price = currentPrice({ session, index, tick })
+    const lastIdx = tick > 0 ? index + 1 : index
+    broker.closeAll(price, lastIdx, session.bars[lastIdx].time, 'session-end')
     const report = gradeSession(broker.trades, session.bars, types)
     recordSession({
       date: new Date().toISOString(),
@@ -82,8 +96,9 @@ export const useReplayStore = create<ReplayStore>((set, get) => {
     session: init.session,
     types: init.types,
     index: init.index,
+    tick: 0,
     playing: false,
-    speedMs: 1200,
+    speedMs: 150,
     stopStyle: 'tight',
     hints: false,
     broker: init.broker,
@@ -100,6 +115,7 @@ export const useReplayStore = create<ReplayStore>((set, get) => {
         types: fresh.types,
         broker: fresh.broker,
         index: fresh.index,
+        tick: 0,
         playing: false,
         report: null,
         finished: false,
@@ -107,17 +123,28 @@ export const useReplayStore = create<ReplayStore>((set, get) => {
       }))
     },
 
-    step: () => {
-      const { index, session, broker, finished } = get()
+    stepTick: () => {
+      const { index, tick, session, broker, finished } = get()
       if (finished) return
-      if (index >= session.bars.length - 1) {
+      const devIdx = index + 1
+      if (devIdx >= session.bars.length) {
         finish()
         return
       }
-      const next = index + 1
-      broker.stepBar(session.bars[next], next)
-      set((s) => ({ index: next, version: s.version + 1 }))
-      if (next >= session.bars.length - 1) finish()
+      const bar = session.bars[devIdx]
+      broker.stepTick(bar, devIdx, tick)
+      const nextTick = tick + 1
+      if (nextTick >= bar.path.length) {
+        set((s) => ({ index: devIdx, tick: 0, version: s.version + 1 }))
+        if (devIdx >= session.bars.length - 1) finish()
+      } else {
+        set((s) => ({ tick: nextTick, version: s.version + 1 }))
+      }
+    },
+
+    nextBar: () => {
+      const target = get().index + 1
+      while (!get().finished && get().index < target) get().stepTick()
     },
 
     setPlaying: (playing) => set({ playing }),
@@ -200,9 +227,10 @@ export const useReplayStore = create<ReplayStore>((set, get) => {
     },
 
     flatten: () => {
-      const { broker, index, session } = get()
-      const last = session.bars[index]
-      broker.closeAll(last.close, index, last.time, 'manual')
+      const { broker, index, tick, session } = get()
+      const price = currentPrice({ session, index, tick })
+      const lastIdx = tick > 0 ? index + 1 : index
+      broker.closeAll(price, lastIdx, session.bars[lastIdx].time, 'manual')
       set((s) => ({ version: s.version + 1 }))
     },
   }
