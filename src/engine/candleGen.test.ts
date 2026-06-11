@@ -143,21 +143,21 @@ describe('generateSession', () => {
     }
   })
 
-  it('bars open at the prior close most of the time, with occasional gaps', () => {
+  it('bars open at the prior close — no huge gaps between bars', () => {
     for (const seed of SEEDS) {
       const { bars } = generateSession({ seed, barCount: 300 })
       let continuous = 0
-      let gapped = 0
       for (let i = 1; i < bars.length; i++) {
         const r = bars[i].high - bars[i].low
+        const prevR = bars[i - 1].high - bars[i - 1].low
         const jump = Math.abs(bars[i].open - bars[i - 1].close)
+        // Worst case is a shaped bar whose body zone excludes the prior close;
+        // even then the open clamps to the nearest zone edge — never further
+        // than the span of the adjacent bars themselves.
+        expect(jump, `seed ${seed} bar ${i}`).toBeLessThanOrEqual(Math.max(r, prevR) * 1.05 + 0.02)
         if (jump <= r * 0.12) continuous++
-        if (jump >= r * 0.25) gapped++
       }
-      // Mostly a continuous market...
-      expect(continuous / (bars.length - 1), `seed ${seed} continuity`).toBeGreaterThan(0.5)
-      // ...but real opening gaps do happen.
-      expect(gapped, `seed ${seed} gaps`).toBeGreaterThanOrEqual(3)
+      expect(continuous / (bars.length - 1), `seed ${seed} continuity`).toBeGreaterThan(0.7)
     }
   })
 

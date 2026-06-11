@@ -139,38 +139,34 @@ export function makeBar(rng: Rng, prev: Bar, spec: BarSpec, barIntervalSec = 900
   let open: number
   let close: number
   const shape = spec.shape ?? 'plain'
+  // Continuous market: every bar opens at (or within a hair of) the prior
+  // close, clamped into the zone its shape requires — no opening gaps.
+  const anchor = prev.close + (rng() - 0.5) * r * 0.05
   switch (shape) {
     case 'hammer': {
       const zone = low + r * 0.7 // body lives in the top 30%
-      const a = round2(rand(rng, zone, high))
-      const b = round2(rand(rng, zone, high))
-      open = green ? Math.min(a, b) : Math.max(a, b)
-      close = green ? Math.max(a, b) : Math.min(a, b)
+      open = round2(Math.min(high, Math.max(zone, anchor)))
+      close = round2(Math.min(high, Math.max(zone, open + (green ? 1 : -1) * r * rand(rng, 0.05, 0.25))))
       break
     }
     case 'shooter': {
       const zone = low + r * 0.3 // body lives in the bottom 30%
-      const a = round2(rand(rng, low, zone))
-      const b = round2(rand(rng, low, zone))
-      open = green ? Math.min(a, b) : Math.max(a, b)
-      close = green ? Math.max(a, b) : Math.min(a, b)
+      open = round2(Math.min(zone, Math.max(low, anchor)))
+      close = round2(Math.min(zone, Math.max(low, open + (green ? 1 : -1) * r * rand(rng, 0.05, 0.25))))
       break
     }
     case 'doji': {
-      const mid = low + r * rand(rng, 0.35, 0.65)
-      open = round2(mid)
-      close = round2(mid + (green ? 1 : -1) * r * 0.02)
+      const zLow = low + r * 0.35
+      const zHigh = low + r * 0.65
+      open = round2(Math.min(zHigh, Math.max(zLow, anchor)))
+      close = round2(Math.min(zHigh, Math.max(zLow, open + (green ? 1 : -1) * r * 0.02)))
       break
     }
     default: {
-      // Continuous market: plain bars open at (or within a hair of) the prior
-      // close; occasionally the open genuinely gaps away from it instead.
       const minBody = Math.max(0.02, r * 0.08)
-      let o = prev.close + (rng() - 0.5) * r * 0.06
-      if (rng() < 0.07) o = prev.close + (green ? 1 : -1) * r * rand(rng, 0.3, 0.9)
       const lowest = green ? low + 0.01 : low + minBody
       const highest = green ? high - minBody : high - 0.01
-      open = round2(Math.min(highest, Math.max(lowest, o)))
+      open = round2(Math.min(highest, Math.max(lowest, anchor)))
       // A directional bar moving WITH its break (green 2u / red 2d) closes
       // near its extreme — trend legs leave small terminal wicks.
       const aligned = (spec.type === '2u' && green) || (spec.type === '2d' && !green)
