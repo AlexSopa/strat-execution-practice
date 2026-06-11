@@ -66,7 +66,8 @@ for (let y = chartBox.y + 8; y < chartBox.y + 470; y += 3) {
 }
 if (grabY === null) throw new Error('never found the draggable stop line hover zone')
 await page.mouse.down()
-await page.mouse.move(dragX, grabY - 45, { steps: 6 })
+// Drag DOWN: lowering a long stop is never clamped, so the move always sticks.
+await page.mouse.move(dragX, grabY + 45, { steps: 6 })
 await page.mouse.up()
 const stopAfter = await tradeCard.locator('.stat-grid strong').first().innerText()
 if (stopAfter === stopBefore) throw new Error(`drag did not move the stop (still ${stopAfter})`)

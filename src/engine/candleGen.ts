@@ -84,6 +84,8 @@ export function makeBar(rng: Rng, prev: Bar, spec: BarSpec, barIntervalSec = 900
   const vol = Math.min(2.4, Math.max(0.45, spec.vol ?? 1))
   const base = Math.max(0.2, Math.abs(prev.close) * 0.012) * vol
   const pr = Math.min(Math.max(rawPr, base * 0.4), base * 2.2)
+  // Hard ceiling so chains of expansion bars can't run ranges away from price.
+  const maxRange = Math.abs(prev.close) * 0.09
   let high: number
   let low: number
 
@@ -100,21 +102,27 @@ export function makeBar(rng: Rng, prev: Bar, spec: BarSpec, barIntervalSec = 900
       if (low < prev.low) low = round2(prev.low)
       break
     }
-    case '2u':
+    case '2u': {
       // Breakout side extends by the vol-anchored amount; the interior side
       // pulls in proportionally to the actual prior range so oversized ranges
       // decay back toward the regime level instead of persisting.
-      high = round2(prev.high + Math.max(0.02, pr * rand(rng, 0.15, 0.85)))
       low = round2(Math.max(prev.low, Math.min(prev.low + rawPr * rand(rng, 0.1, 0.5), prev.high)))
+      const ext = Math.min(pr * rand(rng, 0.15, 0.85), maxRange - (prev.high - low))
+      high = round2(prev.high + Math.max(0.02, ext))
       break
-    case '2d':
-      low = round2(prev.low - Math.max(0.02, pr * rand(rng, 0.15, 0.85)))
+    }
+    case '2d': {
       high = round2(Math.min(prev.high, Math.max(prev.high - rawPr * rand(rng, 0.1, 0.5), prev.low)))
+      const ext = Math.min(pr * rand(rng, 0.15, 0.85), maxRange - (high - prev.low))
+      low = round2(prev.low - Math.max(0.02, ext))
       break
-    case '3':
-      high = round2(prev.high + Math.max(0.02, pr * rand(rng, 0.1, 0.45)))
-      low = round2(prev.low - Math.max(0.02, pr * rand(rng, 0.1, 0.45)))
+    }
+    case '3': {
+      const room = (maxRange - rawPr) / 2
+      high = round2(prev.high + Math.max(0.02, Math.min(pr * rand(rng, 0.1, 0.45), room)))
+      low = round2(prev.low - Math.max(0.02, Math.min(pr * rand(rng, 0.1, 0.45), room)))
       break
+    }
   }
   if (high - low < 0.05) {
     if (spec.type === '2d') low = round2(high - 0.05)
@@ -150,10 +158,16 @@ export function makeBar(rng: Rng, prev: Bar, spec: BarSpec, barIntervalSec = 900
       break
     }
     default: {
-      const bodySize = r * rand(rng, 0.35, 0.75)
-      const bodyLow = low + (r - bodySize) * rand(rng, 0.15, 0.85)
-      open = round2(green ? bodyLow : bodyLow + bodySize)
-      close = round2(green ? bodyLow + bodySize : bodyLow)
+      // Continuous market: plain bars open at (or within a hair of) the prior
+      // close; occasionally the open genuinely gaps away from it instead.
+      const minBody = Math.max(0.02, r * 0.08)
+      let o = prev.close + (rng() - 0.5) * r * 0.06
+      if (rng() < 0.07) o = prev.close + (green ? 1 : -1) * r * rand(rng, 0.3, 0.9)
+      const lowest = green ? low + 0.01 : low + minBody
+      const highest = green ? high - minBody : high - 0.01
+      open = round2(Math.min(highest, Math.max(lowest, o)))
+      const body = Math.max(minBody, Math.min(r * rand(rng, 0.35, 0.75), green ? high - open : open - low))
+      close = round2(green ? open + body : open - body)
     }
   }
   open = Math.min(high, Math.max(low, open))

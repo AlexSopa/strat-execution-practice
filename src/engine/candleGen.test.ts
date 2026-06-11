@@ -122,6 +122,24 @@ describe('generateSession', () => {
     }
   })
 
+  it('bars open at the prior close most of the time, with occasional gaps', () => {
+    for (const seed of SEEDS) {
+      const { bars } = generateSession({ seed, barCount: 300 })
+      let continuous = 0
+      let gapped = 0
+      for (let i = 1; i < bars.length; i++) {
+        const r = bars[i].high - bars[i].low
+        const jump = Math.abs(bars[i].open - bars[i - 1].close)
+        if (jump <= r * 0.12) continuous++
+        if (jump >= r * 0.25) gapped++
+      }
+      // Mostly a continuous market...
+      expect(continuous / (bars.length - 1), `seed ${seed} continuity`).toBeGreaterThan(0.5)
+      // ...but real opening gaps do happen.
+      expect(gapped, `seed ${seed} gaps`).toBeGreaterThanOrEqual(3)
+    }
+  })
+
   it('volatility expands and contracts across the session', () => {
     for (const seed of SEEDS) {
       const { bars } = generateSession({ seed, barCount: 200 })
