@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { generateSession, makeBar, mulberry32 } from './candleGen'
-import { armedSetupsAt, classifySeries, classifyShape } from './strat'
+import { classifySeries, classifyShape } from './strat'
 import type { Bar } from './types'
 
 const SEEDS = [1, 7, 42, 1337, 20260610]
@@ -96,32 +96,41 @@ describe('generateSession', () => {
     }
   })
 
-  it('injects a healthy number of episodes and they detect back correctly', () => {
+  it('the simulated market naturally arms plenty of setups to trade', () => {
     for (const seed of SEEDS) {
-      const { bars, episodes } = generateSession({ seed, barCount: 200 })
-      expect(episodes.length).toBeGreaterThanOrEqual(8)
-      const types = classifySeries(bars)
-      for (const ep of episodes) {
-        const setups = armedSetupsAt(bars, types, ep.armedIndex)
-        const match = setups.find((s) => s.scenario === ep.scenario && s.direction === ep.direction)
-        expect(match, `seed ${seed}: ${ep.scenario} ${ep.direction} at bar ${ep.armedIndex}`).toBeDefined()
-      }
+      const { episodes } = generateSession({ seed, barCount: 200 })
+      expect(episodes.length, `seed ${seed}`).toBeGreaterThanOrEqual(30)
+      const triggered = episodes.filter((e) => e.outcome === 'trigger').length
+      // Both outcomes must occur — entries that fill AND decoys that don't.
+      expect(triggered, `seed ${seed} triggers`).toBeGreaterThanOrEqual(5)
+      expect(episodes.length - triggered, `seed ${seed} fails`).toBeGreaterThanOrEqual(5)
     }
   })
 
-  it('trigger episodes break the trigger on the next bar; fails do not', () => {
+  it('emergent bar-type mix looks like a real tape', () => {
     for (const seed of SEEDS) {
-      const { bars, episodes } = generateSession({ seed, barCount: 200 })
+      const { bars } = generateSession({ seed, barCount: 300 })
       const types = classifySeries(bars)
-      for (const ep of episodes) {
-        const setup = armedSetupsAt(bars, types, ep.armedIndex).find(
-          (s) => s.scenario === ep.scenario && s.direction === ep.direction,
-        )!
-        const next = bars[ep.armedIndex + 1]
-        const took = ep.direction === 'long' ? next.high >= setup.trigger : next.low <= setup.trigger
-        expect(took, `seed ${seed} bar ${ep.armedIndex}`).toBe(ep.outcome === 'trigger')
+      const count = (t: string) => types.filter((x) => x === t).length / (types.length - 1)
+      expect(count('1'), `seed ${seed} inside bars`).toBeGreaterThan(0.04)
+      expect(count('1'), `seed ${seed} inside bars`).toBeLessThan(0.5)
+      expect(count('3'), `seed ${seed} outside bars`).toBeGreaterThan(0.005)
+      expect(count('3'), `seed ${seed} outside bars`).toBeLessThan(0.3)
+    }
+  })
+
+  it('momentum agents produce real trend runs', () => {
+    let best = 0
+    for (const seed of SEEDS) {
+      const { bars } = generateSession({ seed, barCount: 300 })
+      const types = classifySeries(bars)
+      let run = 0
+      for (let i = 1; i < types.length; i++) {
+        run = types[i] === types[i - 1] && (types[i] === '2u' || types[i] === '2d') ? run + 1 : 1
+        best = Math.max(best, run)
       }
     }
+    expect(best).toBeGreaterThanOrEqual(4)
   })
 
   it('bars carry dense tick paths for live intrabar replay', () => {
@@ -143,21 +152,15 @@ describe('generateSession', () => {
     }
   })
 
-  it('bars open at the prior close — no huge gaps between bars', () => {
+  it('bars open at the prior close — no gaps, ever', () => {
     for (const seed of SEEDS) {
       const { bars } = generateSession({ seed, barCount: 300 })
-      let continuous = 0
       for (let i = 1; i < bars.length; i++) {
-        const r = bars[i].high - bars[i].low
-        const prevR = bars[i - 1].high - bars[i - 1].low
         const jump = Math.abs(bars[i].open - bars[i - 1].close)
-        // Worst case is a shaped bar whose body zone excludes the prior close;
-        // even then the open clamps to the nearest zone edge — never further
-        // than the span of the adjacent bars themselves.
-        expect(jump, `seed ${seed} bar ${i}`).toBeLessThanOrEqual(Math.max(r, prevR) * 1.05 + 0.02)
-        if (jump <= r * 0.12) continuous++
+        // The open IS the next tick of the continuous stream, so the largest
+        // possible jump is one tick move (capped at 0.4% of price).
+        expect(jump, `seed ${seed} bar ${i}`).toBeLessThanOrEqual(bars[i - 1].close * 0.0041)
       }
-      expect(continuous / (bars.length - 1), `seed ${seed} continuity`).toBeGreaterThan(0.7)
     }
   })
 

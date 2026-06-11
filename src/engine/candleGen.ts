@@ -1,24 +1,13 @@
-import { TICK, classifyBar } from './strat'
+import { simulateTicks } from './market'
+import { mulberry32, rand } from './rng'
+import type { Rng } from './rng'
+import { TICK, armedSetupsAt, classifySeries } from './strat'
 import type { Bar, BarType, Direction, Scenario, Shape } from './types'
 
+export { mulberry32 }
+export type { Rng }
+
 const round2 = (n: number) => Math.round(n * 100) / 100
-
-/** Deterministic PRNG so sessions are reproducible / shareable by seed. */
-export function mulberry32(seed: number) {
-  let a = seed >>> 0
-  return () => {
-    a |= 0
-    a = (a + 0x6d2b79f5) | 0
-    let t = Math.imul(a ^ (a >>> 15), 1 | a)
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
-  }
-}
-
-export type Rng = () => number
-
-const rand = (rng: Rng, min: number, max: number) => min + rng() * (max - min)
-const pick = <T,>(rng: Rng, arr: T[]): T => arr[Math.floor(rng() * arr.length)]
 
 export interface BarSpec {
   type: BarType
@@ -234,112 +223,50 @@ export interface SessionOptions {
   barIntervalSec?: number
 }
 
+const TICKS_PER_BAR = 24
+
 /**
- * Generate a practice session: a regime-switching random walk with reversal
- * scenarios injected at controlled frequency. ~70% of armed setups trigger
- * (filling a correctly placed entry); the rest break the other way, training
- * no-chase discipline. Triggered setups are followed by a continuation run
- * (trail/add practice) or a quick failure (stop practice).
+ * Generate a practice session by SIMULATING A MARKET, not drawing candles:
+ * ~100 seeded agents (momentum, mean reversion, breakout, noise) trade into
+ * a price-impact model in engine/market.ts; the resulting continuous tick
+ * stream is aggregated into bars (24 ticks each). Strat reversal setups are
+ * then DETECTED from the tape — they emerge from agent behavior the same way
+ * they do in real markets. Bars can never gap: each opens one tick after the
+ * prior close. The episode list is the detected setups with their outcomes.
  */
 export function generateSession(opts: SessionOptions): Session {
   const { seed, barCount = 160, startPrice = 100, barIntervalSec = 900 } = opts
-  const rng = mulberry32(seed)
+  const ticks = simulateTicks(seed, barCount * TICKS_PER_BAR, startPrice)
   const bars: Bar[] = []
+  let time = 1704207600 // cosmetic anchor; bars advance by barIntervalSec
+  for (let i = 0; i < barCount; i++) {
+    const path = ticks.slice(i * TICKS_PER_BAR, (i + 1) * TICKS_PER_BAR)
+    bars.push({
+      time,
+      open: path[0],
+      high: Math.max(...path),
+      low: Math.min(...path),
+      close: path[path.length - 1],
+      path,
+    })
+    time += barIntervalSec
+  }
+
+  const types = classifySeries(bars)
   const episodes: Episode[] = []
-
-  const r0 = startPrice * 0.012
-  const o0 = round2(startPrice + rand(rng, -0.5, 0.5))
-  const first: Bar = {
-    time: 1704207600, // cosmetic anchor; bars advance by barIntervalSec
-    open: o0,
-    high: round2(o0 + r0 * 0.6),
-    low: round2(o0 - r0 * 0.4),
-    close: round2(o0 + r0 * 0.2),
-    path: [o0, round2(o0 - r0 * 0.4), round2(o0 + r0 * 0.6), round2(o0 + r0 * 0.2)],
-  }
-  first.path = first.path.map((p) => Math.min(first.high, Math.max(first.low, p)))
-  bars.push(first)
-
-  let trendUp = rng() < 0.5
-  // Mean-reverting volatility regime with occasional shocks: long quiet
-  // stretches that coil, punctuated by expansions that stretch ranges.
-  let vol = 1
-  const add = (spec: BarSpec) => {
-    vol = Math.min(2.4, Math.max(0.45, vol * Math.exp(0.22 * (rng() - 0.5)) * Math.exp(0.05 * (1 - vol))))
-    if (rng() < 0.04) vol = Math.min(2.4, vol * rand(rng, 1.4, 1.9)) // expansion shock
-    const b = makeBar(rng, bars[bars.length - 1], { vol, ...spec }, barIntervalSec)
-    bars.push(b)
-    return b
-  }
-
-  let cooldown = 2
-  while (bars.length < barCount) {
-    if (cooldown <= 0 && rng() < 0.28) {
-      // ---- inject a scenario episode ----
-      let scenario = pick(rng, SCENARIOS)
-      // Reversals fire against the prevailing trend more often than with it.
-      const dir: Direction = rng() < 0.7 ? (trendUp ? 'short' : 'long') : trendUp ? 'long' : 'short'
-      for (const spec of patternSpecs(rng, scenario, dir)) add(spec)
-      const armedIndex = bars.length - 1
-      if (scenario === '2-2' && armedIndex >= 2) {
-        // If the bar preceding the injected 2 happens to be a 1 or 3, the
-        // pattern is really the more specific scenario — label it that way.
-        const before = classifyBar(bars[armedIndex - 2], bars[armedIndex - 1])
-        if (before === '1') scenario = '1-2-2'
-        else if (before === '3') scenario = '3-2-2'
-      }
-      const triggered = rng() < 0.7
-      episodes.push({ scenario, direction: dir, armedIndex, outcome: triggered ? 'trigger' : 'fail' })
-
-      if (triggered) {
-        // Entry bar: takes the trigger. Usually a clean 2; sometimes a 3 that
-        // wicks through the far side first — the tight-stop wick-out lesson.
-        const asThree = rng() < 0.12
-        add(
-          dir === 'long'
-            ? { type: asThree ? '3' : '2u', green: true, pathOrder: asThree ? 'lowFirst' : rng() < 0.35 ? 'lowFirst' : 'highFirst' }
-            : { type: asThree ? '3' : '2d', green: false, pathOrder: asThree ? 'highFirst' : rng() < 0.35 ? 'highFirst' : 'lowFirst' },
-        )
-        if (rng() < 0.62) {
-          // Follow-through run: 2u-2u-2u (or 2d run) with pauses for adds.
-          const runLen = 1 + Math.floor(rng() * 4)
-          for (let k = 0; k < runLen && bars.length < barCount; k++) {
-            const pause = rng()
-            if (pause < 0.22) add({ type: '1' })
-            else if (pause < 0.34) add(dir === 'long' ? { type: '2d', green: false } : { type: '2u', green: true })
-            else add(dir === 'long' ? { type: '2u', green: true } : { type: '2d', green: false })
-          }
-          trendUp = dir === 'long'
-        } else {
-          // Quick failure back through the entry — stop-placement practice.
-          add(dir === 'long' ? { type: '2d', green: false } : { type: '2u', green: true })
-          if (rng() < 0.5) add(dir === 'long' ? { type: '2d', green: false } : { type: '2u', green: true })
-        }
-      } else {
-        // Decoy: armed but breaks the other way. The unfilled order was correct.
-        add(dir === 'long' ? { type: '2d', green: false } : { type: '2u', green: true })
-        trendUp = dir !== 'long'
-      }
-      cooldown = 2 + Math.floor(rng() * 3)
-    } else {
-      // ---- plain regime walk ----
-      // Quiet regimes coil (more inside bars); expansions print more 3s.
-      const x = rng()
-      if (rng() < 0.06) trendUp = !trendUp
-      const pInside = vol < 0.7 ? 0.34 : vol > 1.6 ? 0.1 : 0.18
-      const pThree = vol > 1.6 ? 0.16 : 0.07
-      let spec: BarSpec
-      if (x < pInside) spec = { type: '1' }
-      else if (x < pInside + pThree) spec = { type: '3' }
-      else if (x < pInside + pThree + 0.52)
-        spec = trendUp ? { type: '2u', green: rng() < 0.75 } : { type: '2d', green: rng() > 0.75 }
-      else spec = trendUp ? { type: '2d', green: rng() < 0.35 } : { type: '2u', green: rng() > 0.35 }
-      add(spec)
-      cooldown--
+  for (let i = 1; i < bars.length - 1; i++) {
+    for (const s of armedSetupsAt(bars, types, i)) {
+      const next = bars[i + 1]
+      const took = s.direction === 'long' ? next.high >= s.trigger : next.low <= s.trigger
+      episodes.push({
+        scenario: s.scenario,
+        direction: s.direction,
+        armedIndex: i,
+        outcome: took ? 'trigger' : 'fail',
+      })
     }
   }
-
-  return { seed, bars: bars.slice(0, barCount), episodes: episodes.filter((e) => e.armedIndex < barCount - 1) }
+  return { seed, bars, episodes }
 }
 
 export { TICK }
