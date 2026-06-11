@@ -103,16 +103,21 @@ export function makeBar(rng: Rng, prev: Bar, spec: BarSpec, barIntervalSec = 900
       break
     }
     case '2u': {
-      // Breakout side extends by the vol-anchored amount; the interior side
-      // pulls in proportionally to the actual prior range so oversized ranges
-      // decay back toward the regime level instead of persisting.
-      low = round2(Math.max(prev.low, Math.min(prev.low + rawPr * rand(rng, 0.1, 0.5), prev.high)))
+      // The interior low is a pullback from the PRIOR CLOSE — shallow most of
+      // the time (real trend legs don't retest every prior bar), with an
+      // occasional deeper retest. In a 2u-2u-2u run this stair-steps: each
+      // bar's low ends up above the high from two bars ago.
+      const deep = rng() < 0.3
+      const pullback = deep ? rawPr * rand(rng, 0.35, 0.8) : pr * rand(rng, 0.05, 0.3)
+      low = round2(Math.max(prev.low, prev.close - pullback))
       const ext = Math.min(pr * rand(rng, 0.15, 0.85), maxRange - (prev.high - low))
       high = round2(prev.high + Math.max(0.02, ext))
       break
     }
     case '2d': {
-      high = round2(Math.min(prev.high, Math.max(prev.high - rawPr * rand(rng, 0.1, 0.5), prev.low)))
+      const deep = rng() < 0.3
+      const pullback = deep ? rawPr * rand(rng, 0.35, 0.8) : pr * rand(rng, 0.05, 0.3)
+      high = round2(Math.min(prev.high, prev.close + pullback))
       const ext = Math.min(pr * rand(rng, 0.15, 0.85), maxRange - (high - prev.low))
       low = round2(prev.low - Math.max(0.02, ext))
       break
@@ -166,8 +171,12 @@ export function makeBar(rng: Rng, prev: Bar, spec: BarSpec, barIntervalSec = 900
       const lowest = green ? low + 0.01 : low + minBody
       const highest = green ? high - minBody : high - 0.01
       open = round2(Math.min(highest, Math.max(lowest, o)))
-      const body = Math.max(minBody, Math.min(r * rand(rng, 0.35, 0.75), green ? high - open : open - low))
-      close = round2(green ? open + body : open - body)
+      // A directional bar moving WITH its break (green 2u / red 2d) closes
+      // near its extreme — trend legs leave small terminal wicks.
+      const aligned = (spec.type === '2u' && green) || (spec.type === '2d' && !green)
+      const span = green ? high - open : open - low
+      const body = Math.max(minBody, span * (aligned ? rand(rng, 0.7, 0.97) : rand(rng, 0.35, 0.75)))
+      close = round2(green ? open + Math.min(body, span) : open - Math.min(body, span))
     }
   }
   open = Math.min(high, Math.max(low, open))

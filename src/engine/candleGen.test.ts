@@ -44,6 +44,27 @@ describe('makeBar', () => {
     }
   })
 
+  it('trend runs stair-step: the 3rd consecutive 2u low clears the 1st 2u high', () => {
+    const rng = mulberry32(123)
+    let stairStepped = 0
+    let shallow = 0
+    const TRIALS = 200
+    for (let n = 0; n < TRIALS; n++) {
+      let b0: Bar = { time: 0, open: 100, high: 101, low: 99, close: 100.8, path: [100, 99, 101, 100.8] }
+      const run: Bar[] = []
+      for (let k = 0; k < 3; k++) {
+        const b = makeBar(rng, b0, { type: '2u', green: true })
+        run.push(b)
+        b0 = b
+      }
+      if (run[2].low > run[0].high) stairStepped++
+      // Shallow retrace: the 2nd bar's low holds above the 1st bar's midpoint.
+      if (run[1].low > (run[0].high + run[0].low) / 2) shallow++
+    }
+    expect(stairStepped / TRIALS).toBeGreaterThan(0.5)
+    expect(shallow / TRIALS).toBeGreaterThan(0.55)
+  })
+
   it('honors pathOrder', () => {
     const rng = mulberry32(8)
     const b = makeBar(rng, prev, { type: '3', pathOrder: 'lowFirst' })
