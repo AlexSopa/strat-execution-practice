@@ -3,7 +3,7 @@
 A **100% free**, browser-only trainer for executing TheStrat reversal setups. No account, no API keys, no
 backend — synthetic candles generated in your browser, stats saved locally.
 
-**Live app:** `https://<your-github-username>.github.io/strat-execution-practice/`
+**Live app: [alexsopa.github.io/strat-execution-practice](https://alexsopa.github.io/strat-execution-practice/)**
 
 ## What it trains
 
