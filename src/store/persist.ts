@@ -13,6 +13,7 @@ export interface SessionSummary {
   seed: number
   trades: number
   totalR: number
+  pnl?: number
   winRate: number | null
   entryAvg: number
   stopsAvg: number

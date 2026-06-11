@@ -90,6 +90,56 @@ describe('Broker fills', () => {
   })
 })
 
+describe('limit orders and market netting', () => {
+  it('a buy limit fills on a pulldown to the level, not on the way up', () => {
+    const b = new Broker()
+    b.stepBar(bar([10.5, 10.2, 10.9, 10.7]), 0)
+    b.placeOrder({ ...buyStop(10.3, 9.79), kind: 'limit' })
+    b.stepBar(bar([10.7, 11.0, 10.8]), 1) // rallies — no fill
+    expect(b.position).toBeNull()
+    b.stepBar(bar([10.8, 10.25, 10.6]), 2) // pulls back through 10.30
+    expect(b.position).not.toBeNull()
+    expect(b.position!.lots[0].price).toBe(10.3)
+  })
+
+  it('a sell limit fills on a rally to the level', () => {
+    const b = new Broker()
+    b.stepBar(bar([10.5, 10.2, 10.9, 10.7]), 0)
+    b.placeOrder({ ...buyStop(11.2, 12.0), direction: 'short', kind: 'limit' })
+    b.stepBar(bar([10.7, 11.3, 11.0]), 1)
+    expect(b.position!.direction).toBe('short')
+    expect(b.position!.lots[0].price).toBe(11.2)
+  })
+
+  it('market orders open, add, net down, and never flip', () => {
+    const b = new Broker()
+    b.stepBar(bar([10.5, 10.2, 10.9, 10.7]), 0)
+    b.marketOrder('long', 100, 10.7, 0, 1, 'tight')
+    expect(b.position!.direction).toBe('long')
+    b.marketOrder('long', 100, 11.0, 1, 2, 'tight')
+    expect(b.openQty()).toBe(200)
+    b.marketOrder('short', 100, 11.5, 2, 3, 'tight') // nets down 1 unit, FIFO
+    expect(b.openQty()).toBe(100)
+    expect(b.position!.partialExits).toEqual([{ qty: 100, entryPrice: 10.7, exitPrice: 11.5 }])
+    b.marketOrder('short', 100, 11.2, 3, 4, 'tight') // flat — closes the trade
+    expect(b.position).toBeNull()
+    const trade = b.trades[0]
+    // (11.5-10.7)*100 scaled out + (11.2-11.0)*100 final = 80 + 20
+    expect(tradePnl(trade)).toBeCloseTo(100)
+    b.marketOrder('short', 100, 11.0, 4, 5, 'tight') // flat + sell = new short, not ignored
+    expect(b.position!.direction).toBe('short')
+  })
+
+  it('remaining-lot average survives a partial exit', () => {
+    const b = new Broker()
+    b.stepBar(bar([10.5, 10.2, 10.9, 10.7]), 0)
+    b.marketOrder('long', 100, 10.0, 0, 1, 'tight')
+    b.marketOrder('long', 100, 12.0, 1, 2, 'tight')
+    b.marketOrder('short', 100, 11.0, 2, 3, 'tight')
+    expect(b.remainingLots()).toEqual([{ price: 12.0, qty: 100 }])
+  })
+})
+
 describe('adds and R math', () => {
   it('adds stack lots and die with the position', () => {
     const b = new Broker()

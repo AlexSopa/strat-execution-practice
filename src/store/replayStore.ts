@@ -17,6 +17,10 @@ import { recordSession } from './persist'
 /** Bars revealed before the trader takes over — enough context to read structure. */
 const WARMUP_BARS = 15
 
+/** 1 unit = 100 shares (~$10k notional on a $100 stock against the $100k account). */
+export const UNIT_QTY = 100
+export const STARTING_BALANCE = 100_000
+
 interface ReplayStore {
   seed: number
   session: Session
@@ -44,7 +48,8 @@ interface ReplayStore {
   setSpeedMs: (ms: number) => void
   setStopStyle: (s: StopStyle) => void
   setHints: (h: boolean) => void
-  placeEntry: (direction: Direction, price: number, stop: number) => void
+  placeEntry: (direction: Direction, price: number, stop: number, kind: 'stop' | 'limit') => void
+  marketOrder: (direction: Direction) => void
   cancelOrder: (id: number) => void
   setStop: (price: number) => void
   setTarget: (price: number | null) => void
@@ -82,6 +87,7 @@ export const useReplayStore = create<ReplayStore>((set, get) => {
       seed: get().seed,
       trades: report.trades.length,
       totalR: report.totalR,
+      pnl: report.totalPnl,
       winRate: report.winRate,
       entryAvg: report.entryAvg,
       stopsAvg: report.stopsAvg,
@@ -152,19 +158,48 @@ export const useReplayStore = create<ReplayStore>((set, get) => {
     setStopStyle: (stopStyle) => set({ stopStyle }),
     setHints: (hints) => set({ hints }),
 
-    placeEntry: (direction, price, stop) => {
-      const { broker, index, session, types, stopStyle } = get()
+    placeEntry: (direction, price, stop, kind) => {
+      const { broker, index, tick, session, types, stopStyle } = get()
+      const mark = currentPrice({ session, index, tick })
+      // A buy stop at/below the market (or buy limit at/above it) is already
+      // marketable — real brokers execute it immediately, so we do too.
+      const marketable =
+        kind === 'stop'
+          ? direction === 'long'
+            ? price <= mark
+            : price >= mark
+          : direction === 'long'
+            ? price >= mark
+            : price <= mark
+      if (marketable) {
+        const lastIdx = tick > 0 ? index + 1 : index
+        const hadPosition = broker.position !== null
+        broker.marketOrder(direction, UNIT_QTY, mark, lastIdx, session.bars[lastIdx].time, stopStyle)
+        if (!hadPosition && broker.position) broker.setStop(stop, index)
+        set((s) => ({ version: s.version + 1 }))
+        return
+      }
       const setup = armedSetupsAt(session.bars, types, index).find((s) => s.direction === direction)
       broker.placeOrder({
         direction,
+        kind,
         price,
-        qty: 100,
+        qty: UNIT_QTY,
         isAdd: false,
         placedBarIndex: index,
         plannedStop: stop,
         declaredStopStyle: stopStyle,
         scenario: setup?.scenario ?? null,
       })
+      set((s) => ({ version: s.version + 1 }))
+    },
+
+    marketOrder: (direction) => {
+      const { broker, index, tick, session, stopStyle, finished } = get()
+      if (finished) return
+      const mark = currentPrice({ session, index, tick })
+      const lastIdx = tick > 0 ? index + 1 : index
+      broker.marketOrder(direction, UNIT_QTY, mark, lastIdx, session.bars[lastIdx].time, stopStyle)
       set((s) => ({ version: s.version + 1 }))
     },
 
@@ -216,7 +251,7 @@ export const useReplayStore = create<ReplayStore>((set, get) => {
           pos.direction === 'long'
             ? Math.round((last.high + TICK) * 100) / 100
             : Math.round((last.low - TICK) * 100) / 100,
-        qty: 100,
+        qty: UNIT_QTY,
         isAdd: true,
         placedBarIndex: index,
         plannedStop: null,

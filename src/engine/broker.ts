@@ -5,7 +5,12 @@ const round2 = (n: number) => Math.round(n * 100) / 100
 export interface EntryOrder {
   id: number
   direction: Direction
-  /** Stop-entry price: buy stop (long) above market / sell stop (short) below. */
+  /**
+   * 'stop' triggers when price breaks through the level (buy above / sell
+   * below — the Strat trigger entry); 'limit' fills on a pullback to the
+   * level (buy below / sell above).
+   */
+  kind: 'stop' | 'limit'
   price: number
   qty: number
   isAdd: boolean
@@ -19,6 +24,7 @@ export interface EntryOrder {
 export interface OpenPosition {
   direction: Direction
   lots: Lot[]
+  partialExits: { qty: number; entryPrice: number; exitPrice: number }[]
   stopPrice: number | null
   targetPrice: number | null
   stopHistory: { barIndex: number; price: number }[]
@@ -43,10 +49,83 @@ export class Broker {
   private nextOrderId = 1
   private lastPrice: number | null = null
 
-  placeOrder(o: Omit<EntryOrder, 'id'>): EntryOrder {
-    const order = { ...o, id: this.nextOrderId++ }
+  placeOrder(o: Omit<EntryOrder, 'id' | 'kind'> & { kind?: EntryOrder['kind'] }): EntryOrder {
+    const order = { kind: 'stop' as const, ...o, id: this.nextOrderId++ }
     this.pendingOrders.push(order)
     return order
+  }
+
+  /** Open quantity remaining after FIFO scale-outs. */
+  openQty(): number {
+    const p = this.position
+    if (!p) return 0
+    const entered = p.lots.reduce((a, l) => a + l.qty, 0)
+    const exited = p.partialExits.reduce((a, e) => a + e.qty, 0)
+    return entered - exited
+  }
+
+  /** Entry lots still open, after FIFO consumption by partial exits. */
+  remainingLots(): { price: number; qty: number }[] {
+    const p = this.position
+    if (!p) return []
+    let consumed = p.partialExits.reduce((a, e) => a + e.qty, 0)
+    const out: { price: number; qty: number }[] = []
+    for (const lot of p.lots) {
+      const take = Math.min(lot.qty, consumed)
+      consumed -= take
+      if (lot.qty - take > 0) out.push({ price: lot.price, qty: lot.qty - take })
+    }
+    return out
+  }
+
+  /**
+   * Immediate execution at the given (current tick) price. Same-direction
+   * fills open or add; opposite-direction fills net down the position FIFO —
+   * you are never long and short at once. Excess beyond the open quantity is
+   * ignored once flat.
+   */
+  marketOrder(
+    direction: Direction,
+    qty: number,
+    price: number,
+    barIndex: number,
+    time: number,
+    declaredStopStyle: StopStyle,
+  ) {
+    price = round2(price)
+    const p = this.position
+    if (!p) {
+      this.position = {
+        direction,
+        lots: [{ price, qty, time, barIndex, isAdd: false }],
+        partialExits: [],
+        stopPrice: null,
+        targetPrice: null,
+        stopHistory: [],
+        declaredStopStyle,
+        scenarioAtEntry: null,
+        entryOrderPrice: price,
+        entryOrderBarIndex: barIndex,
+        maxFavorablePrice: price,
+      }
+      this.events.push({ type: 'entry-fill', barIndex, price, direction })
+      return
+    }
+    if (p.direction === direction) {
+      p.lots.push({ price, qty, time, barIndex, isAdd: true })
+      this.events.push({ type: 'add-fill', barIndex, price })
+      return
+    }
+    // Netting: reduce the open position FIFO; close out when it reaches zero.
+    let remaining = Math.min(qty, this.openQty())
+    for (const lot of this.remainingLots()) {
+      if (remaining <= 0) break
+      const take = Math.min(lot.qty, remaining)
+      p.partialExits.push({ qty: take, entryPrice: lot.price, exitPrice: price })
+      remaining -= take
+    }
+    if (this.openQty() === 0) this.exit(price, barIndex, time, 'manual')
+    else this.events.push({ type: 'exit', barIndex, price, reason: 'manual' })
   }
 
   cancelOrder(id: number) {
@@ -78,6 +157,7 @@ export class Broker {
     this.trades.push({
       direction: p.direction,
       lots: p.lots,
+      partialExits: p.partialExits,
       exitPrice: price,
       exitTime: time,
       exitBarIndex: barIndex,
@@ -107,6 +187,7 @@ export class Broker {
     this.position = {
       direction: order.direction,
       lots: [lot],
+      partialExits: [],
       stopPrice: order.plannedStop,
       targetPrice: null,
       stopHistory: order.plannedStop === null ? [] : [{ barIndex, price: order.plannedStop }],
@@ -171,7 +252,9 @@ export class Broker {
       for (const o of this.pendingOrders) {
         if (o.isAdd && (!p || p.direction !== o.direction)) continue
         if (!o.isAdd && p) continue // one position at a time
-        const hit = o.direction === 'long' ? up && within(o.price) : !up && within(o.price)
+        // Stops fill on a break through the level, limits on a pullback to it.
+        const upCross = (o.kind === 'stop') === (o.direction === 'long')
+        const hit = upCross ? up && within(o.price) : !up && within(o.price)
         if (hit) hits.push({ level: o.price, kind: 'order', order: o })
       }
       if (!hits.length) return
@@ -193,12 +276,22 @@ export class Broker {
   }
 }
 
-/** Total P&L of a closed trade in price terms (per share, qty-weighted). */
+/** Total dollar P&L of a closed trade: scale-outs at their prices, the rest at the final exit. */
 export function tradePnl(trade: Trade): number {
   const sign = trade.direction === 'long' ? 1 : -1
-  return round2(
-    trade.lots.reduce((sum, lot) => sum + sign * (trade.exitPrice - lot.price) * lot.qty, 0),
+  const scaled = trade.partialExits.reduce(
+    (sum, e) => sum + sign * (e.exitPrice - e.entryPrice) * e.qty,
+    0,
   )
+  // Remaining lots after FIFO consumption by the partial exits.
+  let consumed = trade.partialExits.reduce((a, e) => a + e.qty, 0)
+  let rest = 0
+  for (const lot of trade.lots) {
+    const take = Math.min(lot.qty, consumed)
+    consumed -= take
+    rest += sign * (trade.exitPrice - lot.price) * (lot.qty - take)
+  }
+  return round2(scaled + rest)
 }
 
 /** R-multiple: P&L relative to the dollars risked on the initial lot. */

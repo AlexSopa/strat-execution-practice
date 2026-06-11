@@ -36,6 +36,15 @@ if (await trail.count()) {
   await page.screenshot({ path: `${OUT}/replay-after-trade.png` })
 }
 
+// Hotkey market orders: buy 2 units, net down 1, flatten — P&L window updates.
+await page.keyboard.press('b')
+await page.keyboard.press('b')
+await page.waitForSelector('text=Lots')
+await page.keyboard.press('s')
+await page.keyboard.press('f')
+await page.waitForSelector('text=Order ticket')
+await page.screenshot({ path: `${OUT}/replay-hotkeys.png` })
+
 // --- Quiz tab: answer one question end to end ---
 await page.click('button:has-text("Pattern quiz")')
 await page.waitForSelector("text=What's armed")

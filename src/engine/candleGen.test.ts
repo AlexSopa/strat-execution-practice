@@ -112,6 +112,16 @@ describe('generateSession', () => {
     }
   })
 
+  it('prices stay positive and ranges stay proportionate to price', () => {
+    for (const seed of SEEDS) {
+      const { bars } = generateSession({ seed, barCount: 300 })
+      for (const b of bars) {
+        expect(b.low).toBeGreaterThan(0)
+        expect(b.high - b.low).toBeLessThan(Math.abs(b.close) * 0.16)
+      }
+    }
+  })
+
   it('volatility expands and contracts across the session', () => {
     for (const seed of SEEDS) {
       const { bars } = generateSession({ seed, barCount: 200 })

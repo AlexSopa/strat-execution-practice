@@ -4,7 +4,7 @@ import type { ChartMarker, ChartPriceLine } from '../../components/CandleChart'
 import { tradePnl, tradeR } from '../../engine/broker'
 import { TICK, classifyShape, magnitudeTarget, isValidAddBar, expectedTrailStop } from '../../engine/strat'
 import type { Direction } from '../../engine/types'
-import { currentPrice, useArmedSetups, useReplayStore } from '../../store/replayStore'
+import { STARTING_BALANCE, currentPrice, useArmedSetups, useReplayStore } from '../../store/replayStore'
 import ReportCard from './ReportCard'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
@@ -45,6 +45,36 @@ export default function ReplayMode() {
     return () => clearInterval(id)
   }, [playing, speedMs, finished])
 
+  // Hotkeys: B buy 1 unit · S sell 1 unit · F flatten · N next bar · Space play/pause
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null
+      if (target && ['INPUT', 'SELECT', 'TEXTAREA'].includes(target.tagName)) return
+      const st = useReplayStore.getState()
+      if (st.finished) return
+      switch (e.key.toLowerCase()) {
+        case 'b':
+          st.marketOrder('long')
+          break
+        case 's':
+          st.marketOrder('short')
+          break
+        case 'f':
+          st.flatten()
+          break
+        case 'n':
+          st.nextBar()
+          break
+        case ' ':
+          e.preventDefault()
+          st.setPlaying(!st.playing)
+          break
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
   const markers: ChartMarker[] = useMemo(() => {
     if (!showTypes) return []
     // Only closed bars get labels — the developing bar's type isn't known yet.
@@ -76,7 +106,9 @@ export default function ReplayMode() {
     }
     const pos = broker.position
     if (pos) {
-      const avg = pos.lots.reduce((a, l) => a + l.price * l.qty, 0) / pos.lots.reduce((a, l) => a + l.qty, 0)
+      const rem = broker.remainingLots()
+      const remQty = rem.reduce((a, l) => a + l.qty, 0)
+      const avg = remQty ? rem.reduce((a, l) => a + l.price * l.qty, 0) / remQty : pos.lots[0].price
       lines.push({ price: round2(avg), color: '#e0e6f0', title: 'avg entry' })
       if (pos.stopPrice !== null) lines.push({ price: pos.stopPrice, color: '#ef5350', title: 'stop' })
       if (pos.targetPrice !== null) lines.push({ price: pos.targetPrice, color: '#26a69a', title: 'target', dashed: true })
@@ -155,12 +187,53 @@ export default function ReplayMode() {
       </div>
 
       <div className="side-panel">
+        <PnlWindow />
         {broker.position ? <InTradePanel /> : <OrderTicket />}
         <PendingOrders />
         <TradeLog />
+        <div className="card muted small">
+          Hotkeys: <strong>B</strong> buy 1 unit · <strong>S</strong> sell 1 unit · <strong>F</strong> flatten
+          all · <strong>N</strong> next bar · <strong>Space</strong> play/pause. One unit = 100 shares.
+          Opposite-side orders net down — you're never long and short at once.
+        </div>
       </div>
 
       {finished && store.report && <ReportCard report={store.report} onNewSession={() => store.newSession()} />}
+    </div>
+  )
+}
+
+function PnlWindow() {
+  const store = useReplayStore()
+  const { broker } = store
+  const mark = currentPrice(store)
+
+  const realizedClosed = broker.trades.reduce((a, tr) => a + tradePnl(tr), 0)
+  const pos = broker.position
+  const sign = pos?.direction === 'long' ? 1 : -1
+  const realizedScaled = pos
+    ? pos.partialExits.reduce((a, e) => a + sign * (e.exitPrice - e.entryPrice) * e.qty, 0)
+    : 0
+  const realized = round2(realizedClosed + realizedScaled)
+  const open = round2(
+    broker.remainingLots().reduce((a, l) => a + sign * (mark - l.price) * l.qty, 0),
+  )
+  const equity = round2(STARTING_BALANCE + realized + open)
+  const dollars = (n: number) => `${n < 0 ? '-' : '+'}$${Math.abs(n).toLocaleString('en-US', { maximumFractionDigits: 0 })}`
+
+  return (
+    <div className="card pnl-window">
+      <div className="stat-grid">
+        <span>Account equity</span>
+        <strong className={equity >= STARTING_BALANCE ? 'green' : 'red'}>
+          ${equity.toLocaleString('en-US', { maximumFractionDigits: 0 })}
+        </strong>
+        <span>Open P&L</span>
+        <strong className={open >= 0 ? 'green' : 'red'}>{dollars(open)}</strong>
+        <span>Realized P&L</span>
+        <strong className={realized >= 0 ? 'green' : 'red'}>{dollars(realized)}</strong>
+      </div>
+      <div className="muted small">Starting account $100,000 — resets each session.</div>
     </div>
   )
 }
@@ -170,10 +243,18 @@ function OrderTicket() {
   const armed = useArmedSetups()
   const { session, index, stopStyle } = store
   const last = session.bars[index]
+  const [kind, setKind] = useState<'stop' | 'limit'>('stop')
 
-  const defaults = (direction: Direction) => {
+  const defaults = (direction: Direction, k: 'stop' | 'limit') => {
     const setup = armed.find((s) => s.direction === direction)
-    const entry = direction === 'long' ? round2(last.high + TICK) : round2(last.low - TICK)
+    const entry =
+      k === 'stop'
+        ? direction === 'long'
+          ? round2(last.high + TICK)
+          : round2(last.low - TICK)
+        : direction === 'long'
+          ? round2(last.low)
+          : round2(last.high)
     const stop = setup
       ? stopStyle === 'tight'
         ? setup.tightStop
@@ -184,16 +265,23 @@ function OrderTicket() {
     return { entry, stop }
   }
 
-  const [long, setLong] = useState(defaults('long'))
-  const [short, setShort] = useState(defaults('short'))
+  const [long, setLong] = useState(defaults('long', kind))
+  const [short, setShort] = useState(defaults('short', kind))
   useEffect(() => {
-    setLong(defaults('long'))
-    setShort(defaults('short'))
-  }, [index, stopStyle]) // eslint-disable-line react-hooks/exhaustive-deps
+    setLong(defaults('long', kind))
+    setShort(defaults('short', kind))
+  }, [index, stopStyle, kind]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="card">
       <h3>Order ticket</h3>
+      <label className="row">
+        Entry type
+        <select value={kind} onChange={(e) => setKind(e.target.value as 'stop' | 'limit')}>
+          <option value="stop">Stop — fill on the break</option>
+          <option value="limit">Limit — fill on a pullback</option>
+        </select>
+      </label>
       <label className="row">
         Stop style
         <select value={stopStyle} onChange={(e) => store.setStopStyle(e.target.value as 'tight' | 'setup')}>
@@ -203,27 +291,36 @@ function OrderTicket() {
       </label>
       <div className="ticket-row">
         <div>
-          <div className="muted">Buy stop</div>
+          <div className="muted">Buy {kind}</div>
           <input type="number" step="0.01" value={long.entry} onChange={(e) => setLong({ ...long, entry: Number(e.target.value) })} />
           <div className="muted">Stop loss</div>
           <input type="number" step="0.01" value={long.stop} onChange={(e) => setLong({ ...long, stop: Number(e.target.value) })} />
-          <button className="btn btn-green" onClick={() => store.placeEntry('long', long.entry, long.stop)}>
+          <button className="btn btn-green" onClick={() => store.placeEntry('long', long.entry, long.stop, kind)}>
             Place long
           </button>
         </div>
         <div>
-          <div className="muted">Sell stop</div>
+          <div className="muted">Sell {kind}</div>
           <input type="number" step="0.01" value={short.entry} onChange={(e) => setShort({ ...short, entry: Number(e.target.value) })} />
           <div className="muted">Stop loss</div>
           <input type="number" step="0.01" value={short.stop} onChange={(e) => setShort({ ...short, stop: Number(e.target.value) })} />
-          <button className="btn btn-red" onClick={() => store.placeEntry('short', short.entry, short.stop)}>
+          <button className="btn btn-red" onClick={() => store.placeEntry('short', short.entry, short.stop, kind)}>
             Place short
           </button>
         </div>
       </div>
+      <div className="ticket-row">
+        <button className="btn btn-green" onClick={() => store.marketOrder('long')}>
+          Buy market (B)
+        </button>
+        <button className="btn btn-red" onClick={() => store.marketOrder('short')}>
+          Sell market (S)
+        </button>
+      </div>
       <p className="muted small">
-        Spot a reversal arming, pre-place the stop order at the break of the last bar's extreme ± 0.01, and let
-        price come to you. Unfilled orders on failed setups are wins too.
+        The Strat entry is the stop order at the break of the last bar's extreme ± 0.01 — let price come to
+        you. Unfilled orders on failed setups are wins too. Market entries are graded against the armed
+        trigger, so fire them only as the break happens.
       </p>
     </div>
   )
@@ -237,8 +334,9 @@ function InTradePanel() {
   const mark = currentPrice(store)
   const [stopInput, setStopInput] = useState<string>('')
 
-  const qty = pos.lots.reduce((a, l) => a + l.qty, 0)
-  const avg = round2(pos.lots.reduce((a, l) => a + l.price * l.qty, 0) / qty)
+  const rem = broker.remainingLots()
+  const qty = rem.reduce((a, l) => a + l.qty, 0)
+  const avg = qty ? round2(rem.reduce((a, l) => a + l.price * l.qty, 0) / qty) : pos.lots[0].price
   const sign = pos.direction === 'long' ? 1 : -1
   const initialStop = pos.stopHistory.length ? pos.stopHistory[0].price : null
   const riskPerShare = initialStop === null ? null : Math.abs(pos.lots[0].price - initialStop)
@@ -291,6 +389,14 @@ function InTradePanel() {
           </button>
         )}
         <div className="row">
+          <button className="btn btn-green" style={{ flex: 1 }} onClick={() => store.marketOrder('long')}>
+            Buy 1 (B)
+          </button>
+          <button className="btn btn-red" style={{ flex: 1 }} onClick={() => store.marketOrder('short')}>
+            Sell 1 (S)
+          </button>
+        </div>
+        <div className="row">
           <input
             type="number"
             step="0.01"
@@ -328,7 +434,7 @@ function PendingOrders() {
         <div key={o.id} className="row order-row">
           <span className={o.direction === 'long' ? 'green' : 'red'}>
             {o.isAdd ? 'ADD ' : ''}
-            {o.direction === 'long' ? 'BUY' : 'SELL'} stop {o.price.toFixed(2)}
+            {o.direction === 'long' ? 'BUY' : 'SELL'} {o.kind} {o.price.toFixed(2)}
           </span>
           <button className="btn btn-small" onClick={() => store.cancelOrder(o.id)}>
             Cancel
@@ -351,13 +457,15 @@ function TradeLog() {
       </h3>
       {trades.map((tr, k) => {
         const r = tradeR(tr)
+        const pnl = tradePnl(tr)
         return (
           <div key={k} className="row order-row">
             <span className={tr.direction === 'long' ? 'green' : 'red'}>
               {tr.direction.toUpperCase()} {tr.lots.length > 1 ? `×${tr.lots.length}` : ''} → {tr.exitReason}
             </span>
-            <span className={(r ?? 0) >= 0 ? 'green' : 'red'}>
-              {r !== null ? `${r >= 0 ? '+' : ''}${r.toFixed(2)}R` : `$${tradePnl(tr).toFixed(0)}`}
+            <span className={pnl >= 0 ? 'green' : 'red'}>
+              {pnl >= 0 ? '+' : '-'}${Math.abs(pnl).toFixed(0)}
+              {r !== null ? ` (${r >= 0 ? '+' : ''}${r.toFixed(2)}R)` : ''}
             </span>
           </div>
         )

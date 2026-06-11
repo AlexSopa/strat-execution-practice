@@ -48,6 +48,12 @@ export default function ReportCard({
               <span className={report.totalR >= 0 ? 'green' : 'red'}>
                 Total <strong>{report.totalR >= 0 ? '+' : ''}{report.totalR.toFixed(2)}R</strong>
               </span>
+              <span className={report.totalPnl >= 0 ? 'green' : 'red'}>
+                P&L{' '}
+                <strong>
+                  {report.totalPnl >= 0 ? '+' : '-'}${Math.abs(report.totalPnl).toLocaleString('en-US', { maximumFractionDigits: 0 })}
+                </strong>
+              </span>
             </div>
             {Object.keys(report.byScenario).length > 0 && (
               <div className="muted small">

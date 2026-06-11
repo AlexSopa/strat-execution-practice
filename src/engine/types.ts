@@ -40,7 +40,10 @@ export interface Lot {
 
 export interface Trade {
   direction: Direction
+  /** Entry fills, in order (immutable record — includes units later scaled out). */
   lots: Lot[]
+  /** Units scaled out before the final exit, FIFO against the entry lots. */
+  partialExits: { qty: number; entryPrice: number; exitPrice: number }[]
   exitPrice: number
   exitTime: number
   exitBarIndex: number

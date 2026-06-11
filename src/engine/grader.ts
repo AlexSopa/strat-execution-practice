@@ -1,4 +1,4 @@
-import { tradeR } from './broker'
+import { tradePnl, tradeR } from './broker'
 import { armedSetupsAt, expectedTrailStop, isValidAddBar } from './strat'
 import type { ArmedSetup, Bar, BarType, Scenario, Trade } from './types'
 
@@ -18,6 +18,7 @@ export interface SessionReport {
   managementAvg: number
   overall: number
   totalR: number
+  totalPnl: number
   winRate: number | null
   byScenario: Partial<Record<Scenario, { count: number; totalR: number }>>
 }
@@ -169,6 +170,7 @@ export function gradeSession(trades: Trade[], bars: Bar[], types: (BarType | nul
     managementAvg,
     overall: avg([entryAvg, stopsAvg, managementAvg]),
     totalR: Math.round(rs.reduce((a, b) => a + b, 0) * 100) / 100,
+    totalPnl: Math.round(trades.reduce((a, tr) => a + tradePnl(tr), 0) * 100) / 100,
     winRate: rs.length ? Math.round((rs.filter((r) => r > 0).length / rs.length) * 100) : null,
     byScenario,
   }

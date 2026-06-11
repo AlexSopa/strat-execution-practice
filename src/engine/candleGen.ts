@@ -76,17 +76,21 @@ function buildPath(
  * Guarantees the bar classifies as spec.type and (when given) spec.shape.
  */
 export function makeBar(rng: Rng, prev: Bar, spec: BarSpec, barIntervalSec = 900): Bar {
-  const pr = prev.high - prev.low
-  // Volatility regime scales how far bars extend beyond the prior bar —
-  // expansions stretch breaks and outside bars, contractions shrink them.
+  const rawPr = prev.high - prev.low
+  // Volatility regime scales how far bars extend beyond the prior bar.
+  // Extensions are anchored to a percent-of-price base (not the raw prior
+  // range) so expansion stretches and contraction coils WITHOUT ranges
+  // compounding exponentially across the session.
   const vol = Math.min(2.4, Math.max(0.45, spec.vol ?? 1))
+  const base = Math.max(0.2, Math.abs(prev.close) * 0.012) * vol
+  const pr = Math.min(Math.max(rawPr, base * 0.4), base * 2.2)
   let high: number
   let low: number
 
   switch (spec.type) {
     case '1': {
-      const r = pr * Math.min(0.85, rand(rng, 0.35, 0.8) * Math.sqrt(vol))
-      const slack = pr - r
+      const r = rawPr * Math.min(0.85, rand(rng, 0.35, 0.8) * Math.sqrt(vol))
+      const slack = rawPr - r
       low = round2(prev.low + slack * rand(rng, 0.15, 0.85))
       high = round2(low + r)
       if (high > prev.high) {
@@ -97,19 +101,25 @@ export function makeBar(rng: Rng, prev: Bar, spec: BarSpec, barIntervalSec = 900
       break
     }
     case '2u':
-      high = round2(prev.high + Math.max(0.02, pr * rand(rng, 0.15, 0.85) * vol))
-      low = round2(prev.low + pr * rand(rng, 0.05, 0.45))
+      // Breakout side extends by the vol-anchored amount; the interior side
+      // pulls in proportionally to the actual prior range so oversized ranges
+      // decay back toward the regime level instead of persisting.
+      high = round2(prev.high + Math.max(0.02, pr * rand(rng, 0.15, 0.85)))
+      low = round2(Math.max(prev.low, Math.min(prev.low + rawPr * rand(rng, 0.1, 0.5), prev.high)))
       break
     case '2d':
-      low = round2(prev.low - Math.max(0.02, pr * rand(rng, 0.15, 0.85) * vol))
-      high = round2(prev.high - pr * rand(rng, 0.05, 0.45))
+      low = round2(prev.low - Math.max(0.02, pr * rand(rng, 0.15, 0.85)))
+      high = round2(Math.min(prev.high, Math.max(prev.high - rawPr * rand(rng, 0.1, 0.5), prev.low)))
       break
     case '3':
-      high = round2(prev.high + Math.max(0.02, pr * rand(rng, 0.1, 0.6) * vol))
-      low = round2(prev.low - Math.max(0.02, pr * rand(rng, 0.1, 0.6) * vol))
+      high = round2(prev.high + Math.max(0.02, pr * rand(rng, 0.1, 0.45)))
+      low = round2(prev.low - Math.max(0.02, pr * rand(rng, 0.1, 0.45)))
       break
   }
-  if (high - low < 0.05) high = round2(low + 0.05)
+  if (high - low < 0.05) {
+    if (spec.type === '2d') low = round2(high - 0.05)
+    else high = round2(low + 0.05)
+  }
 
   const r = high - low
   const green = spec.green ?? rng() < 0.5
