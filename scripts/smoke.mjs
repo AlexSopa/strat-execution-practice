@@ -45,6 +45,35 @@ await page.keyboard.press('f')
 await page.waitForSelector('text=Order ticket')
 await page.screenshot({ path: `${OUT}/replay-hotkeys.png` })
 
+// Auto-stop + drag: market buy attaches a stop; grab the line and drag it.
+await page.keyboard.press('b')
+await page.waitForSelector('text=Lots')
+const tradeCard = page.locator('.side-panel .card').nth(1)
+const stopBefore = await tradeCard.locator('.stat-grid strong').first().innerText()
+if (stopBefore === '—') throw new Error('market entry did not auto-attach a stop')
+const chartBox = await page.locator('.chart-panel').boundingBox()
+const dragX = chartBox.x + chartBox.width * 0.5
+let grabY = null
+for (let y = chartBox.y + 8; y < chartBox.y + 470; y += 3) {
+  await page.mouse.move(dragX, y)
+  const grabbing = await page.evaluate(
+    () => [...document.querySelectorAll('.chart-panel div')].some((d) => d.style.cursor === 'ns-resize'),
+  )
+  if (grabbing) {
+    grabY = y
+    break
+  }
+}
+if (grabY === null) throw new Error('never found the draggable stop line hover zone')
+await page.mouse.down()
+await page.mouse.move(dragX, grabY - 45, { steps: 6 })
+await page.mouse.up()
+const stopAfter = await tradeCard.locator('.stat-grid strong').first().innerText()
+if (stopAfter === stopBefore) throw new Error(`drag did not move the stop (still ${stopAfter})`)
+console.log(`drag OK: stop ${stopBefore} -> ${stopAfter}`)
+await page.screenshot({ path: `${OUT}/replay-dragged-stop.png` })
+await page.keyboard.press('f')
+
 // --- Quiz tab: answer one question end to end ---
 await page.click('button:has-text("Pattern quiz")')
 await page.waitForSelector("text=What's armed")

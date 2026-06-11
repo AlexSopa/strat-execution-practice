@@ -199,7 +199,19 @@ export const useReplayStore = create<ReplayStore>((set, get) => {
       if (finished) return
       const mark = currentPrice({ session, index, tick })
       const lastIdx = tick > 0 ? index + 1 : index
+      const hadPosition = broker.position !== null
       broker.marketOrder(direction, UNIT_QTY, mark, lastIdx, session.bars[lastIdx].time, stopStyle)
+      // Fresh market entries get an automatic stop at the entry bar's
+      // low/high ± 0.01 — visible on the chart immediately, draggable after.
+      if (!hadPosition && broker.position) {
+        const closed = session.bars[index]
+        const seen = tick > 0 ? session.bars[index + 1].path.slice(0, tick) : []
+        const autoStop =
+          direction === 'long'
+            ? Math.round((Math.min(closed.low, ...seen) - TICK) * 100) / 100
+            : Math.round((Math.max(closed.high, ...seen) + TICK) * 100) / 100
+        broker.setStop(autoStop, index)
+      }
       set((s) => ({ version: s.version + 1 }))
     },
 

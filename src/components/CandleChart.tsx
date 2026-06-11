@@ -30,10 +30,19 @@ export interface ChartPriceLine {
   dashed?: boolean
 }
 
+export interface DraggableLine {
+  price: number
+  color?: string
+  title?: string
+  onMove: (price: number) => void
+}
+
 interface Props {
   bars: Bar[]
   markers?: ChartMarker[]
   priceLines?: ChartPriceLine[]
+  /** A horizontal line the user can grab and drag; onMove fires on release. */
+  draggableLine?: DraggableLine
   onPriceClick?: (price: number) => void
   height?: number
   /** Keep the latest bar in view as data streams in (replay). */
@@ -46,6 +55,7 @@ export default function CandleChart({
   bars,
   markers = [],
   priceLines = [],
+  draggableLine,
   onPriceClick,
   height = 420,
   followLatest = false,
@@ -56,6 +66,10 @@ export default function CandleChart({
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null)
   const priceLinesRef = useRef<IPriceLine[]>([])
+  const dragLineRef = useRef<IPriceLine | null>(null)
+  const dragStateRef = useRef<{ dragging: boolean; price: number }>({ dragging: false, price: 0 })
+  const dragPropsRef = useRef(draggableLine)
+  dragPropsRef.current = draggableLine
   const clickRef = useRef(onPriceClick)
   clickRef.current = onPriceClick
 
@@ -105,15 +119,84 @@ export default function CandleChart({
       chart.applyOptions({ width: el.clientWidth })
     })
     ro.observe(el)
+
+    // --- draggable line: hover shows a grab cursor, drag moves the line,
+    // --- release commits the new price. Chart pan is paused while dragging.
+    const lineY = () => {
+      const dl = dragPropsRef.current
+      if (!dl || !seriesRef.current) return null
+      return seriesRef.current.priceToCoordinate(dragStateRef.current.dragging ? dragStateRef.current.price : dl.price)
+    }
+    const eventY = (e: PointerEvent) => e.clientY - el.getBoundingClientRect().top
+    const GRAB = 8
+    const onPointerDown = (e: PointerEvent) => {
+      const y = lineY()
+      if (y === null || Math.abs(eventY(e) - y) > GRAB) return
+      dragStateRef.current = { dragging: true, price: dragPropsRef.current!.price }
+      chart.applyOptions({ handleScroll: false, handleScale: false })
+      el.setPointerCapture(e.pointerId)
+      e.preventDefault()
+    }
+    const onPointerMove = (e: PointerEvent) => {
+      if (!dragStateRef.current.dragging) {
+        const y = lineY()
+        el.style.cursor = y !== null && Math.abs(eventY(e) - y) <= GRAB ? 'ns-resize' : ''
+        return
+      }
+      const price = seriesRef.current?.coordinateToPrice(eventY(e))
+      if (price == null) return
+      dragStateRef.current.price = Math.round(price * 100) / 100
+      dragLineRef.current?.applyOptions({ price: dragStateRef.current.price })
+    }
+    const onPointerUp = (e: PointerEvent) => {
+      if (!dragStateRef.current.dragging) return
+      dragStateRef.current.dragging = false
+      chart.applyOptions({ handleScroll: true, handleScale: true })
+      el.releasePointerCapture(e.pointerId)
+      dragPropsRef.current?.onMove(dragStateRef.current.price)
+    }
+    el.addEventListener('pointerdown', onPointerDown)
+    el.addEventListener('pointermove', onPointerMove)
+    el.addEventListener('pointerup', onPointerUp)
+
     return () => {
+      el.removeEventListener('pointerdown', onPointerDown)
+      el.removeEventListener('pointermove', onPointerMove)
+      el.removeEventListener('pointerup', onPointerUp)
       ro.disconnect()
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
       markersRef.current = null
       priceLinesRef.current = []
+      dragLineRef.current = null
     }
   }, [height])
+
+  useEffect(() => {
+    const series = seriesRef.current
+    if (!series) return
+    if (dragStateRef.current.dragging) return // don't fight an in-progress drag
+    if (!draggableLine) {
+      if (dragLineRef.current) {
+        series.removePriceLine(dragLineRef.current)
+        dragLineRef.current = null
+      }
+      return
+    }
+    if (dragLineRef.current) {
+      dragLineRef.current.applyOptions({ price: draggableLine.price })
+    } else {
+      dragLineRef.current = series.createPriceLine({
+        price: draggableLine.price,
+        color: draggableLine.color ?? '#ef5350',
+        lineWidth: 2,
+        lineStyle: LineStyle.Solid,
+        axisLabelVisible: true,
+        title: draggableLine.title ?? 'stop ⇕',
+      })
+    }
+  }, [draggableLine])
 
   useEffect(() => {
     const series = seriesRef.current

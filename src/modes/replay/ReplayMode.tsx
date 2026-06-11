@@ -110,7 +110,7 @@ export default function ReplayMode() {
       const remQty = rem.reduce((a, l) => a + l.qty, 0)
       const avg = remQty ? rem.reduce((a, l) => a + l.price * l.qty, 0) / remQty : pos.lots[0].price
       lines.push({ price: round2(avg), color: '#e0e6f0', title: 'avg entry' })
-      if (pos.stopPrice !== null) lines.push({ price: pos.stopPrice, color: '#ef5350', title: 'stop' })
+      // The stop itself renders as the draggable line, not a static one.
       if (pos.targetPrice !== null) lines.push({ price: pos.targetPrice, color: '#26a69a', title: 'target', dashed: true })
     }
     if (hints) {
@@ -126,10 +126,33 @@ export default function ReplayMode() {
     return lines
   }, [broker, hints, armed, store.version]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  const pos = broker.position
+  const stopLine =
+    pos && pos.stopPrice !== null
+      ? {
+          price: pos.stopPrice,
+          title: 'stop ⇕ drag',
+          onMove: (p: number) => {
+            // Keep the stop on the protective side of the market.
+            const mark = currentPrice(useReplayStore.getState())
+            const clamped =
+              pos.direction === 'long' ? Math.min(p, round2(mark - 0.01)) : Math.max(p, round2(mark + 0.01))
+            useReplayStore.getState().setStop(clamped)
+          },
+        }
+      : undefined
+
   return (
     <div className="replay-layout">
       <div className="panel chart-panel">
-        <CandleChart bars={visible} markers={markers} priceLines={priceLines} followLatest height={480} />
+        <CandleChart
+          bars={visible}
+          markers={markers}
+          priceLines={priceLines}
+          draggableLine={stopLine}
+          followLatest
+          height={480}
+        />
         <div className="transport">
           <button className="btn" onClick={() => store.setPlaying(!playing)} disabled={finished}>
             {playing ? '⏸ Pause' : '▶ Play'}
@@ -194,7 +217,8 @@ export default function ReplayMode() {
         <div className="card muted small">
           Hotkeys: <strong>B</strong> buy 1 unit · <strong>S</strong> sell 1 unit · <strong>F</strong> flatten
           all · <strong>N</strong> next bar · <strong>Space</strong> play/pause. One unit = 100 shares.
-          Opposite-side orders net down — you're never long and short at once.
+          Opposite-side orders net down — you're never long and short at once. Entries auto-attach a stop at
+          the entry bar's low/high ± 0.01 — <strong>drag the red stop line</strong> on the chart to move it.
         </div>
       </div>
 
